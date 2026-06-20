@@ -64,13 +64,24 @@ export async function POST(request: Request) {
   // Build the instruction text.
   const instructionText = hasImage
     ? `You are a sports overlay assistant. The screenshot shows the current state of a live broadcast.
-Look carefully at the broadcast graphics burned into the image — scoreboard, score bug, team names, match clock, stats panels.
-Use ONLY what you can see on screen. Do not use prior knowledge of famous teams or scores.
 
-You must call render_layout to compose a layout of 1–6 widgets placed in screen slots.
-Choose slots that avoid covering the main action or existing broadcast graphics where possible.
+STEP 1 — Read the broadcast image carefully:
+  a) Identify the MAIN ACTION AREA: where is the ball / play happening? What region of the screen is the center of attention?
+  b) Identify existing ON-SCREEN broadcast graphics: score bug (bottom-left or top area), lower-thirds, team logos, sponsor banners, match clock overlays.
+  c) Identify any EMPTY regions that have no text or graphics burned in.
+
+STEP 2 — Choose slots that:
+  - AVOID the main action area (center of the screen where the play is happening).
+  - AVOID covering existing broadcast graphics already burned into the feed.
+  - PREFER the identified empty regions.
+  - SPREAD OUT widgets: never cluster two wide widgets in adjacent top slots (e.g. do NOT use top-center AND top-right for two wide scoreboard/alert widgets — they will collide). Instead spread across top and bottom, or left and right.
 
 Available slots: top-left, top-center, top-right, middle-left, middle-right, bottom-left, bottom-center, bottom-right.
+- top-* = upper 25% of video; bottom-* = lower 25%; middle-* = side edges at vertical center.
+- Wide widgets (scoreboard, statpanel) need at least ~300px. top-center and top-right are adjacent — using both for wide widgets causes overlap.
+- Prefer non-adjacent slots for multi-widget layouts: e.g. top-left + bottom-right, or top-center + bottom-left.
+
+STEP 3 — Use ONLY data visible in the screenshot. Do not use prior knowledge of teams or scores.
 
 Widget types:
 - scoreboard: for live match scores and team information
@@ -80,7 +91,7 @@ Widget types:
 
 The user said: "${text}".
 Compose the best layout for this intent. For broad requests like "show me the match" or "full overview",
-use multiple widgets — e.g. scoreboard top-center + statpanel bottom-left.
+use multiple widgets — e.g. scoreboard top-left + statpanel bottom-right (non-adjacent, non-colliding).
 For single-widget requests, one node is fine.
 Call render_layout with the data you can read from the broadcast.`
     : `You are a sports overlay assistant. The user said: "${text}".
@@ -94,8 +105,13 @@ Widget types:
 - statpanel: when the user asks for match statistics like possession, shots on target, corners, or pass accuracy
 - alert: for short dramatic announcements or events (e.g. "goal!", "show penalty alert", "red card")
 
+Slot placement rules:
+- SPREAD widgets across the screen — avoid adjacent top slots for two wide widgets (e.g. top-center + top-right collide).
+- Prefer non-adjacent combinations: top-left + bottom-right, top-center + bottom-left, etc.
+- Avoid the center of the screen (middle-left and middle-right are safer than top-center for secondary widgets).
+
 For broad requests like "show me the full match" or "give me the full match overview", compose multiple widgets
-(e.g. scoreboard top-center + statpanel bottom-left + alert top-right for key events).
+(e.g. scoreboard top-left + statpanel bottom-right — non-adjacent, non-colliding).
 For focused single-intent requests, one node is fine.
 If no real data is known, invent plausible example data for a demo.
 Call render_layout with the best matching layout.`

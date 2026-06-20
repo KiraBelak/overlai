@@ -4,7 +4,8 @@ import { TimerWidget } from '../widgets/Timer'
 import { StatPanelWidget } from '../widgets/StatPanel'
 import { AlertWidget } from '../widgets/Alert'
 
-type WidgetComponent = React.ComponentType<{ data: any }>
+// delay is the optional stagger offset passed by the Overlay choreography layer.
+type WidgetComponent = React.ComponentType<{ data: any; delay?: number }>
 
 const registry: Record<string, WidgetComponent> = {
   scoreboard: ScoreboardWidget,

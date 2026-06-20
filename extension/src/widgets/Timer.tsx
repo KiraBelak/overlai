@@ -4,6 +4,8 @@ import type { Timer } from '../lib/schema'
 
 interface Props {
   data: Timer
+  /** Optional entrance delay in seconds for staggered choreography. Default: 0. */
+  delay?: number
 }
 
 function formatTime(seconds: number): string {
@@ -14,7 +16,7 @@ function formatTime(seconds: number): string {
 
 // Injected widgets use inline styles (not Tailwind): self-contained, immune to
 // the host page's CSS, and they never leak styles back into the host page.
-export function TimerWidget({ data }: Props) {
+export function TimerWidget({ data, delay = 0 }: Props) {
   const [remaining, setRemaining] = useState(data.durationSeconds)
 
   useEffect(() => {
@@ -42,7 +44,7 @@ export function TimerWidget({ data }: Props) {
       initial={{ opacity: 0, y: -20, scale: 0.95 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: -20, scale: 0.95 }}
-      transition={{ type: 'spring', stiffness: 300, damping: 25 }}
+      transition={{ type: 'spring', stiffness: 300, damping: 25, delay }}
       style={{
         display: 'inline-flex',
         flexDirection: 'column',
