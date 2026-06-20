@@ -46,12 +46,55 @@ export const AlertSchema = z.object({
 
 export type Alert = z.infer<typeof AlertSchema>
 
-// --- Discriminated union ---
-export const WidgetSchema = z.discriminatedUnion('type', [
+// --- Widget node (discriminated union of the 4 widget types) ---
+export const WidgetNodeSchema = z.discriminatedUnion('type', [
   ScoreboardSchema,
   TimerSchema,
   StatPanelSchema,
   AlertSchema,
 ])
 
-export type Widget = z.infer<typeof WidgetSchema>
+export type WidgetNode = z.infer<typeof WidgetNodeSchema>
+
+// Keep the old name as an alias for backward compatibility inside the extension.
+export const WidgetSchema = WidgetNodeSchema
+export type Widget = WidgetNode
+
+// --- Slot positions ---
+// 8 fixed regions relative to the video element.
+export const SlotSchema = z.enum([
+  'top-left',
+  'top-center',
+  'top-right',
+  'middle-left',
+  'middle-right',
+  'bottom-left',
+  'bottom-center',
+  'bottom-right',
+])
+
+export type Slot = z.infer<typeof SlotSchema>
+
+// --- Layout node: one widget placed in one slot ---
+export const LayoutNodeSchema = z.object({
+  widget: WidgetNodeSchema,
+  slot: SlotSchema,
+  zIndex: z.number().int().optional(),
+})
+
+export type LayoutNode = z.infer<typeof LayoutNodeSchema>
+
+// --- Layout: flat, bounded (1–6 nodes), non-recursive ---
+// Flat structure required: Anthropic strict structured outputs do not support
+// recursive schemas or numerical constraints at the top level.
+export const LayoutSchema = z.object({
+  type: z.literal('layout'),
+  nodes: z.array(LayoutNodeSchema).min(1).max(6),
+})
+
+export type Layout = z.infer<typeof LayoutSchema>
+
+// --- Top-level response: single widget (back-compat) OR a layout ---
+export const ResponseSchema = z.union([WidgetNodeSchema, LayoutSchema])
+
+export type OverlaiResponse = z.infer<typeof ResponseSchema>

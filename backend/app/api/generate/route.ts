@@ -1,14 +1,23 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { WidgetSchema } from '@/lib/schema'
+import { WidgetNodeSchema, LayoutSchema, ResponseSchema } from '@/lib/schema'
 
 // Hardcoded fallback returned when ANTHROPIC_API_KEY is missing (dev without a key).
-const FALLBACK_SCOREBOARD = {
-  type: 'scoreboard' as const,
-  teams: [
-    { name: 'Real Madrid', score: 2 },
-    { name: 'FC Barcelona', score: 1 },
+// Returns a valid Layout so the no-key path exercises the new schema.
+const FALLBACK_LAYOUT = {
+  type: 'layout' as const,
+  nodes: [
+    {
+      slot: 'top-center' as const,
+      widget: {
+        type: 'scoreboard' as const,
+        teams: [
+          { name: 'Real Madrid', score: 2 },
+          { name: 'FC Barcelona', score: 1 },
+        ],
+        minute: 67,
+      },
+    },
   ],
-  minute: 67,
 }
 
 // CORS headers applied to every response so the Chrome extension can call this.
@@ -36,12 +45,12 @@ export async function POST(request: Request) {
 
   const apiKey = process.env.ANTHROPIC_API_KEY
 
-  // --- No API key: return a hardcoded valid schema so the UI still works in dev ---
+  // --- No API key: return a hardcoded valid Layout so the UI still works in dev ---
   if (!apiKey) {
     console.warn(
-      '[overlai] ANTHROPIC_API_KEY is not set — returning hardcoded fallback scoreboard.'
+      '[overlai] ANTHROPIC_API_KEY is not set — returning hardcoded fallback layout.'
     )
-    return Response.json(FALLBACK_SCOREBOARD, { headers: CORS_HEADERS })
+    return Response.json(FALLBACK_LAYOUT, { headers: CORS_HEADERS })
   }
 
   // --- Real Claude call via structured output (tool use) ---
@@ -52,35 +61,50 @@ export async function POST(request: Request) {
   const hasImage = typeof image === 'string' && image.startsWith('data:')
   const model = hasImage ? 'claude-sonnet-4-6' : 'claude-haiku-4-5'
 
-  // Build the instruction text. With a screenshot, Claude must read the broadcast
-  // graphics rather than inventing data from prior knowledge.
+  // Build the instruction text.
   const instructionText = hasImage
     ? `You are a sports overlay assistant. The screenshot shows the current state of a live broadcast.
 Look carefully at the broadcast graphics burned into the image — scoreboard, score bug, team names, match clock, stats panels.
 Use ONLY what you can see on screen. Do not use prior knowledge of famous teams or scores.
-Choose the most appropriate widget type for the user's intent:
+
+You must call render_layout to compose a layout of 1–6 widgets placed in screen slots.
+Choose slots that avoid covering the main action or existing broadcast graphics where possible.
+
+Available slots: top-left, top-center, top-right, middle-left, middle-right, bottom-left, bottom-center, bottom-right.
+
+Widget types:
 - scoreboard: for live match scores and team information
 - statpanel: for match statistics (possession, shots, corners, etc.)
 - timer: when the user wants a countdown or timer
 - alert: for short announcements like "GOAL!", "Penalty!", or key events
+
 The user said: "${text}".
-Call render_widget with the data you can read from the broadcast.`
+Compose the best layout for this intent. For broad requests like "show me the match" or "full overview",
+use multiple widgets — e.g. scoreboard top-center + statpanel bottom-left.
+For single-widget requests, one node is fine.
+Call render_layout with the data you can read from the broadcast.`
     : `You are a sports overlay assistant. The user said: "${text}".
-Choose the most appropriate widget type for the user's intent:
+
+You must call render_layout to compose a layout of 1–6 widgets placed in screen slots.
+Available slots: top-left, top-center, top-right, middle-left, middle-right, bottom-left, bottom-center, bottom-right.
+
+Widget types:
 - scoreboard: questions about the score, match result, or teams playing (e.g. "what's the score?", "show me the scoreboard")
 - timer: when the user wants a countdown or timer (e.g. "start a 5 minute timer", "30 second countdown")
 - statpanel: when the user asks for match statistics like possession, shots on target, corners, or pass accuracy
 - alert: for short dramatic announcements or events (e.g. "goal!", "show penalty alert", "red card")
-Call render_widget with the best matching widget data.
-If no real data is known, invent plausible example data for a demo.`
+
+For broad requests like "show me the full match" or "give me the full match overview", compose multiple widgets
+(e.g. scoreboard top-center + statpanel bottom-left + alert top-right for key events).
+For focused single-intent requests, one node is fine.
+If no real data is known, invent plausible example data for a demo.
+Call render_layout with the best matching layout.`
 
   // Build the user content: image block (if present) followed by the instruction text.
   type UserContent = Anthropic.MessageParam['content']
   let userContent: UserContent
 
   if (hasImage) {
-    // Strip the data URL prefix to get the raw base64 string.
-    // Format: "data:image/jpeg;base64,<base64data>"
     const commaIndex = image!.indexOf(',')
     const base64Data = commaIndex !== -1 ? image!.slice(commaIndex + 1) : image!
 
@@ -102,121 +126,140 @@ If no real data is known, invent plausible example data for a demo.`
     userContent = instructionText
   }
 
-  // The tool schema supports all 4 widget types via a flat JSON Schema.
-  // The `type` field discriminates which widget to render. Only `type` is
-  // universally required; per-type required fields are enforced by Zod after
-  // Claude returns the tool input.
+  // The tool schema supports a flat layout of 1–6 widget nodes.
+  // Each node has: slot (enum), widget (flat object with all widget fields), optional zIndex.
+  // The `widget.type` field discriminates which widget it is; per-type required fields
+  // are enforced by Zod after Claude returns the tool input (backstop validation).
   //
-  // Field guide by type:
-  //   scoreboard — requires: teams (array of 2 {name, score}); optional: minute
-  //   timer      — requires: durationSeconds (integer > 0); optional: label
-  //   statpanel  — requires: stats (1–6 {label, value} objects); optional: title
-  //   alert      — requires: message; optional: tone (info|success|warning)
+  // FLAT structure: no recursion, no nested arrays of arrays — required by Anthropic
+  // strict structured outputs which do not support recursive schemas.
   //
-  // Forcing tool_choice guarantees Claude always returns structured tool_input,
-  // never raw JSON text — this is the reliable structured-output pattern.
+  // strict: true enables native Anthropic arg validation as a first layer.
+  // Zod per-node validation is kept as the backstop (see graceful fallback below).
   const response = await client.messages.create({
     model,
-    max_tokens: 1024,
+    max_tokens: 2048,
     tools: [
       {
-        name: 'render_widget',
+        name: 'render_layout',
         description:
-          'Render a UI widget over a live video based on the user request. ' +
-          'Choose the widget type that best matches intent: ' +
-          '"scoreboard" for live match scores; ' +
-          '"timer" when the user asks for a countdown or timer; ' +
-          '"statpanel" for match statistics like possession, shots, or corners; ' +
-          '"alert" for short dramatic announcements like GOAL or Penalty.',
+          'Compose a layout of 1–6 overlay widgets placed in fixed screen slots. ' +
+          'Each node specifies a slot position and a widget. ' +
+          'Use multiple nodes when the user\'s intent benefits from seeing several widgets at once ' +
+          '(e.g. "show me the full match" → scoreboard top-center + statpanel bottom-left). ' +
+          'Single-widget requests can use one node. ' +
+          'Choose slots to avoid covering the main broadcast action.',
         input_schema: {
           type: 'object' as const,
           properties: {
-            type: {
-              type: 'string',
-              enum: ['scoreboard', 'timer', 'statpanel', 'alert'],
-              description:
-                'The widget type to render. ' +
-                'scoreboard=live score, timer=countdown, statpanel=match stats, alert=announcement.',
-            },
-            // scoreboard fields
-            teams: {
+            nodes: {
               type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  name: { type: 'string', description: 'Team name' },
-                  score: {
-                    type: 'integer',
-                    minimum: 0,
-                    description: 'Goals scored',
-                  },
-                },
-                required: ['name', 'score'],
-              },
-              minItems: 2,
-              maxItems: 2,
-              description: '[scoreboard] Exactly two teams: [home, away].',
-            },
-            minute: {
-              type: 'integer',
-              minimum: 0,
-              description: '[scoreboard] Current match minute (optional).',
-            },
-            // timer fields
-            durationSeconds: {
-              type: 'integer',
-              minimum: 1,
-              description:
-                '[timer] Countdown duration in seconds. Required for timer type.',
-            },
-            label: {
-              type: 'string',
-              description: '[timer] Optional label shown above the countdown.',
-            },
-            // statpanel fields
-            title: {
-              type: 'string',
-              description: '[statpanel] Optional title shown above the stats list.',
-            },
-            stats: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  label: {
-                    type: 'string',
-                    description: 'Stat name (e.g. "Possession")',
-                  },
-                  value: {
-                    type: 'string',
-                    description: 'Stat value (e.g. "58%")',
-                  },
-                },
-                required: ['label', 'value'],
-              },
+              description: '1–6 widget nodes composing the layout.',
               minItems: 1,
               maxItems: 6,
-              description:
-                '[statpanel] 1–6 key/value stat rows. Required for statpanel type.',
-            },
-            // alert fields
-            message: {
-              type: 'string',
-              description:
-                '[alert] Short announcement text (e.g. "GOAL!", "Penalty!"). Required for alert type.',
-            },
-            tone: {
-              type: 'string',
-              enum: ['info', 'success', 'warning'],
-              description:
-                '[alert] Visual accent: info=blue, success=green, warning=orange. Defaults to info.',
+              items: {
+                type: 'object',
+                properties: {
+                  slot: {
+                    type: 'string',
+                    enum: [
+                      'top-left',
+                      'top-center',
+                      'top-right',
+                      'middle-left',
+                      'middle-right',
+                      'bottom-left',
+                      'bottom-center',
+                      'bottom-right',
+                    ],
+                    description:
+                      'Screen region where this widget appears. ' +
+                      'top-* = upper quarter, middle-* = center sides, bottom-* = lower quarter.',
+                  },
+                  zIndex: {
+                    type: 'integer',
+                    description: 'Optional stacking order. Higher = on top. Default 10.',
+                  },
+                  // widget fields — flat (not nested object) to comply with strict mode limits.
+                  // The `widget_type` field discriminates; all widget field names are unique
+                  // across widget types so they can coexist in one flat object.
+                  widget_type: {
+                    type: 'string',
+                    enum: ['scoreboard', 'timer', 'statpanel', 'alert'],
+                    description:
+                      'Type of widget to render. ' +
+                      'scoreboard=live score, timer=countdown, statpanel=match stats, alert=announcement.',
+                  },
+                  // scoreboard fields
+                  teams: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        name: { type: 'string', description: 'Team name' },
+                        score: { type: 'integer', minimum: 0, description: 'Goals scored' },
+                      },
+                      required: ['name', 'score'],
+                    },
+                    minItems: 2,
+                    maxItems: 2,
+                    description: '[scoreboard] Exactly two teams: [home, away].',
+                  },
+                  minute: {
+                    type: 'integer',
+                    minimum: 0,
+                    description: '[scoreboard] Current match minute (optional).',
+                  },
+                  // timer fields
+                  durationSeconds: {
+                    type: 'integer',
+                    minimum: 1,
+                    description: '[timer] Countdown duration in seconds.',
+                  },
+                  label: {
+                    type: 'string',
+                    description: '[timer] Optional label shown above the countdown.',
+                  },
+                  // statpanel fields
+                  title: {
+                    type: 'string',
+                    description: '[statpanel] Optional title shown above the stats list.',
+                  },
+                  stats: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        label: { type: 'string', description: 'Stat name (e.g. "Possession")' },
+                        value: { type: 'string', description: 'Stat value (e.g. "58%")' },
+                      },
+                      required: ['label', 'value'],
+                    },
+                    minItems: 1,
+                    maxItems: 6,
+                    description: '[statpanel] 1–6 key/value stat rows.',
+                  },
+                  // alert fields
+                  message: {
+                    type: 'string',
+                    description: '[alert] Short announcement text (e.g. "GOAL!", "Penalty!").',
+                  },
+                  tone: {
+                    type: 'string',
+                    enum: ['info', 'success', 'warning'],
+                    description:
+                      '[alert] Visual accent: info=blue, success=green, warning=orange.',
+                  },
+                },
+                required: ['slot', 'widget_type'],
+              },
             },
           },
-          required: ['type'],
+          required: ['nodes'],
         },
       },
     ],
-    tool_choice: { type: 'tool', name: 'render_widget' },
+    tool_choice: { type: 'tool', name: 'render_layout' },
     messages: [{ role: 'user', content: userContent }],
   })
 
@@ -229,15 +272,74 @@ If no real data is known, invent plausible example data for a demo.`
     )
   }
 
-  // Validate the tool input with Zod before sending to the extension.
-  const parsed = WidgetSchema.safeParse(toolUse.input)
-  if (!parsed.success) {
-    console.error('[overlai] Zod validation failed:', parsed.error)
+  // Claude returns flat nodes: each node has widget_type + all widget fields at the
+  // same level. We reshape each node into the nested { slot, widget: {...} } structure
+  // that the Zod LayoutSchema expects.
+  const rawInput = toolUse.input as {
+    nodes: Array<{
+      slot: string
+      zIndex?: number
+      widget_type: string
+      // scoreboard
+      teams?: Array<{ name: string; score: number }>
+      minute?: number
+      // timer
+      durationSeconds?: number
+      label?: string
+      // statpanel
+      title?: string
+      stats?: Array<{ label: string; value: string }>
+      // alert
+      message?: string
+      tone?: string
+    }>
+  }
+
+  // Reshape flat node → nested LayoutNode. Validate each node independently.
+  // Graceful fallback: if a node fails Zod validation, DROP that node and render the
+  // rest rather than failing the whole response. Log dropped nodes.
+  const validNodes: Array<{ slot: string; zIndex?: number; widget: unknown }> = []
+
+  for (const rawNode of rawInput.nodes ?? []) {
+    const { slot, zIndex, widget_type, ...widgetFields } = rawNode
+
+    // Build the widget object from the flat fields.
+    const widgetCandidate = { type: widget_type, ...widgetFields }
+
+    // Validate the widget with Zod.
+    const widgetParsed = WidgetNodeSchema.safeParse(widgetCandidate)
+    if (!widgetParsed.success) {
+      console.warn(
+        '[overlai] Dropping invalid node (widget_type=%s, slot=%s): %s',
+        widget_type,
+        slot,
+        widgetParsed.error.message
+      )
+      continue
+    }
+
+    validNodes.push({ slot, zIndex, widget: widgetParsed.data })
+  }
+
+  // If all nodes were dropped, return an error rather than an empty layout.
+  if (validNodes.length === 0) {
     return Response.json(
-      { error: 'Widget schema validation failed', details: parsed.error },
+      { error: 'All layout nodes failed schema validation' },
       { status: 502, headers: CORS_HEADERS }
     )
   }
 
-  return Response.json(parsed.data, { headers: CORS_HEADERS })
+  // Build the Layout response object and run a final top-level validation.
+  const layoutCandidate = { type: 'layout' as const, nodes: validNodes }
+  const layoutParsed = LayoutSchema.safeParse(layoutCandidate)
+
+  if (!layoutParsed.success) {
+    console.error('[overlai] Layout Zod validation failed:', layoutParsed.error)
+    return Response.json(
+      { error: 'Layout schema validation failed', details: layoutParsed.error },
+      { status: 502, headers: CORS_HEADERS }
+    )
+  }
+
+  return Response.json(layoutParsed.data, { headers: CORS_HEADERS })
 }

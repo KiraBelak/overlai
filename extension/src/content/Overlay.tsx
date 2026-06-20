@@ -1,15 +1,76 @@
 import { useEffect, useState } from 'react'
 import { AnimatePresence } from 'framer-motion'
-import { WidgetSchema, type Widget } from '../lib/schema'
+import {
+  ResponseSchema,
+  LayoutSchema,
+  WidgetNodeSchema,
+  type Layout,
+  type LayoutNode,
+  type Slot,
+} from '../lib/schema'
 import { getWidget } from '../lib/registry'
 
 // Single constant — easy to swap for production URL.
 const BACKEND_BASE_URL = 'http://localhost:3000'
 
+// Padding (px) between each slot container and the video edge / center.
+const SLOT_PADDING = 16
+
+// Maps a Slot enum value to absolute CSS positioning relative to the video rect.
+// Each slot is an absolutely-positioned container; the widget renders inside it.
+function slotStyle(slot: Slot, rect: DOMRect): React.CSSProperties {
+  const p = SLOT_PADDING
+
+  // Vertical bands: top = top quarter, middle = vertical center, bottom = bottom quarter
+  // Horizontal: left edge, horizontal center, right edge
+  const top = rect.top
+  const left = rect.left
+  const right = rect.right
+  const bottom = rect.bottom
+  const centerX = rect.left + rect.width / 2
+  const centerY = rect.top + rect.height / 2
+
+  const positions: Record<Slot, React.CSSProperties> = {
+    'top-left':      { top: top + p,       left: left + p },
+    'top-center':    { top: top + p,       left: centerX, transform: 'translateX(-50%)' },
+    'top-right':     { top: top + p,       right: window.innerWidth - right + p },
+    'middle-left':   { top: centerY,       left: left + p, transform: 'translateY(-50%)' },
+    'middle-right':  { top: centerY,       right: window.innerWidth - right + p, transform: 'translateY(-50%)' },
+    'bottom-left':   { bottom: window.innerHeight - bottom + p, left: left + p },
+    'bottom-center': { bottom: window.innerHeight - bottom + p, left: centerX, transform: 'translateX(-50%)' },
+    'bottom-right':  { bottom: window.innerHeight - bottom + p, right: window.innerWidth - right + p },
+  }
+
+  return {
+    position: 'fixed',
+    pointerEvents: 'none',
+    ...positions[slot],
+  }
+}
+
+// When the backend returns a bare widget (back-compat), wrap it as a 1-node layout
+// placed at top-left so the renderer always sees a Layout.
+function normalizeToLayout(raw: unknown): Layout | null {
+  // Try layout first (has type: 'layout')
+  const layoutParsed = LayoutSchema.safeParse(raw)
+  if (layoutParsed.success) return layoutParsed.data
+
+  // Try single widget — wrap in a layout at top-left
+  const widgetParsed = WidgetNodeSchema.safeParse(raw)
+  if (widgetParsed.success) {
+    return {
+      type: 'layout',
+      nodes: [{ widget: widgetParsed.data, slot: 'top-left' }],
+    }
+  }
+
+  return null
+}
+
 type OverlayState =
   | { status: 'idle' }
   | { status: 'loading' }
-  | { status: 'widget'; data: Widget }
+  | { status: 'layout'; data: Layout }
   | { status: 'error'; message: string }
 
 export function Overlay() {
@@ -55,13 +116,19 @@ export function Overlay() {
 
         const rawData = await response.json()
 
-        // Validate with Zod before rendering — safety net for unexpected LLM output.
-        const parsed = WidgetSchema.safeParse(rawData)
+        // Validate with the top-level ResponseSchema — handles both Layout and bare widget.
+        const parsed = ResponseSchema.safeParse(rawData)
         if (!parsed.success) {
-          throw new Error(`Invalid widget schema from backend: ${parsed.error.message}`)
+          throw new Error(`Invalid response schema from backend: ${parsed.error.message}`)
         }
 
-        setState({ status: 'widget', data: parsed.data })
+        // Normalize to a Layout regardless of whether we got a bare widget or a layout.
+        const layout = normalizeToLayout(parsed.data)
+        if (!layout) {
+          throw new Error('Could not normalize response to a layout')
+        }
+
+        setState({ status: 'layout', data: layout })
       } catch (err) {
         setState({
           status: 'error',
@@ -76,83 +143,83 @@ export function Overlay() {
     return () => window.removeEventListener('overlai:query', handleQuery)
   }, [])
 
-  // Widget anchor: top-left corner of the <video>, or fixed fallback.
-  const anchorTop = videoRect ? videoRect.top + 16 : 16
-  const anchorLeft = videoRect ? videoRect.left + 16 : 16
+  // Fallback video rect when no <video> is found: treat the full viewport as the rect.
+  const effectiveRect = videoRect ?? new DOMRect(0, 0, window.innerWidth, window.innerHeight)
+
+  // Sort layout nodes by zIndex ascending so higher zIndex renders on top.
+  const sortedNodes: LayoutNode[] =
+    state.status === 'layout'
+      ? [...state.data.nodes].sort((a, b) => (a.zIndex ?? 10) - (b.zIndex ?? 10))
+      : []
 
   return (
     <div style={{ pointerEvents: 'none', width: '100%', height: '100%', position: 'relative' }}>
-      <div
-        style={{
-          position: 'absolute',
-          top: anchorTop,
-          left: anchorLeft,
-          pointerEvents: 'none',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 8,
-        }}
-      >
-        {/* Loading indicator */}
-        <AnimatePresence>
-          {state.status === 'loading' && (
-            <div
-              style={{
-                background: 'rgba(0,0,0,0.6)',
-                color: '#facc15',
-                fontSize: 12,
-                padding: '6px 12px',
-                borderRadius: 8,
-                fontFamily: 'monospace',
-              }}
-            >
-              Building widget...
-            </div>
-          )}
-        </AnimatePresence>
+      {/* Loading indicator — anchored top-left of the video */}
+      <AnimatePresence>
+        {state.status === 'loading' && (
+          <div
+            style={{
+              position: 'fixed',
+              top: effectiveRect.top + SLOT_PADDING,
+              left: effectiveRect.left + SLOT_PADDING,
+              background: 'rgba(0,0,0,0.6)',
+              color: '#facc15',
+              fontSize: 12,
+              padding: '6px 12px',
+              borderRadius: 8,
+              fontFamily: 'monospace',
+              pointerEvents: 'none',
+            }}
+          >
+            Building layout...
+          </div>
+        )}
+      </AnimatePresence>
 
-        {/* Error message */}
-        <AnimatePresence>
-          {state.status === 'error' && (
-            <div
-              style={{
-                background: 'rgba(200,0,0,0.7)',
-                color: '#fff',
-                fontSize: 12,
-                padding: '6px 12px',
-                borderRadius: 8,
-                fontFamily: 'monospace',
-                maxWidth: 320,
-              }}
-            >
-              {state.message}
-            </div>
-          )}
-        </AnimatePresence>
+      {/* Error message — anchored top-left of the video */}
+      <AnimatePresence>
+        {state.status === 'error' && (
+          <div
+            style={{
+              position: 'fixed',
+              top: effectiveRect.top + SLOT_PADDING,
+              left: effectiveRect.left + SLOT_PADDING,
+              background: 'rgba(200,0,0,0.7)',
+              color: '#fff',
+              fontSize: 12,
+              padding: '6px 12px',
+              borderRadius: 8,
+              fontFamily: 'monospace',
+              maxWidth: 320,
+              pointerEvents: 'none',
+            }}
+          >
+            {state.message}
+          </div>
+        )}
+      </AnimatePresence>
 
-        {/* Rendered widget */}
-        <AnimatePresence mode="wait">
-          {state.status === 'widget' && (() => {
-            const WidgetComponent = getWidget(state.data.type)
-            if (!WidgetComponent) {
-              return (
-                <div
-                  style={{
-                    background: 'rgba(0,0,0,0.5)',
-                    color: '#aaa',
-                    fontSize: 11,
-                    padding: '4px 8px',
-                    borderRadius: 6,
-                  }}
-                >
-                  Unknown widget type: {state.data.type}
-                </div>
-              )
-            }
-            return <WidgetComponent key={state.data.type} data={state.data} />
-          })()}
-        </AnimatePresence>
-      </div>
+      {/* Slot-based layout renderer */}
+      {state.status === 'layout' &&
+        sortedNodes.map((node, index) => {
+          const WidgetComponent = getWidget(node.widget.type)
+
+          // Skip nodes whose widget type is not in the registry (graceful per-node fallback).
+          if (!WidgetComponent) {
+            console.warn('[overlai] Unknown widget type in layout node:', node.widget.type)
+            return null
+          }
+
+          const style = slotStyle(node.slot as Slot, effectiveRect)
+
+          return (
+            <AnimatePresence key={`${node.slot}-${index}`} mode="wait">
+              <div style={{ ...style, zIndex: node.zIndex ?? 10 }}>
+                <WidgetComponent data={node.widget} />
+              </div>
+            </AnimatePresence>
+          )
+        })}
     </div>
   )
 }
