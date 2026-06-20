@@ -55,15 +55,24 @@ export async function POST(request: Request) {
   // Build the instruction text. With a screenshot, Claude must read the broadcast
   // graphics rather than inventing data from prior knowledge.
   const instructionText = hasImage
-    ? `You are a football overlay assistant. The screenshot shows the current state of a live broadcast.
-Look carefully at the broadcast graphics burned into the image — scoreboard, score bug, team names, match clock.
+    ? `You are a sports overlay assistant. The screenshot shows the current state of a live broadcast.
+Look carefully at the broadcast graphics burned into the image — scoreboard, score bug, team names, match clock, stats panels.
 Use ONLY what you can see on screen. Do not use prior knowledge of famous teams or scores.
-If the score or match minute is not visible in the image, omit the minute field and use generic team name placeholders.
+Choose the most appropriate widget type for the user's intent:
+- scoreboard: for live match scores and team information
+- statpanel: for match statistics (possession, shots, corners, etc.)
+- timer: when the user wants a countdown or timer
+- alert: for short announcements like "GOAL!", "Penalty!", or key events
 The user said: "${text}".
 Call render_widget with the data you can read from the broadcast.`
-    : `You are a football overlay assistant. The user said: "${text}". ` +
-      'Call render_widget with the best matching widget data. ' +
-      'If no real scores are known, invent plausible example data for a demo.'
+    : `You are a sports overlay assistant. The user said: "${text}".
+Choose the most appropriate widget type for the user's intent:
+- scoreboard: questions about the score, match result, or teams playing (e.g. "what's the score?", "show me the scoreboard")
+- timer: when the user wants a countdown or timer (e.g. "start a 5 minute timer", "30 second countdown")
+- statpanel: when the user asks for match statistics like possession, shots on target, corners, or pass accuracy
+- alert: for short dramatic announcements or events (e.g. "goal!", "show penalty alert", "red card")
+Call render_widget with the best matching widget data.
+If no real data is known, invent plausible example data for a demo.`
 
   // Build the user content: image block (if present) followed by the instruction text.
   type UserContent = Anthropic.MessageParam['content']
@@ -93,7 +102,17 @@ Call render_widget with the data you can read from the broadcast.`
     userContent = instructionText
   }
 
-  // The tool schema mirrors ScoreboardSchema from lib/schema.ts.
+  // The tool schema supports all 4 widget types via a flat JSON Schema.
+  // The `type` field discriminates which widget to render. Only `type` is
+  // universally required; per-type required fields are enforced by Zod after
+  // Claude returns the tool input.
+  //
+  // Field guide by type:
+  //   scoreboard — requires: teams (array of 2 {name, score}); optional: minute
+  //   timer      — requires: durationSeconds (integer > 0); optional: label
+  //   statpanel  — requires: stats (1–6 {label, value} objects); optional: title
+  //   alert      — requires: message; optional: tone (info|success|warning)
+  //
   // Forcing tool_choice guarantees Claude always returns structured tool_input,
   // never raw JSON text — this is the reliable structured-output pattern.
   const response = await client.messages.create({
@@ -104,15 +123,22 @@ Call render_widget with the data you can read from the broadcast.`
         name: 'render_widget',
         description:
           'Render a UI widget over a live video based on the user request. ' +
-          'Currently supports: scoreboard (live match score).',
+          'Choose the widget type that best matches intent: ' +
+          '"scoreboard" for live match scores; ' +
+          '"timer" when the user asks for a countdown or timer; ' +
+          '"statpanel" for match statistics like possession, shots, or corners; ' +
+          '"alert" for short dramatic announcements like GOAL or Penalty.',
         input_schema: {
           type: 'object' as const,
           properties: {
             type: {
               type: 'string',
-              enum: ['scoreboard'],
-              description: 'The widget type to render.',
+              enum: ['scoreboard', 'timer', 'statpanel', 'alert'],
+              description:
+                'The widget type to render. ' +
+                'scoreboard=live score, timer=countdown, statpanel=match stats, alert=announcement.',
             },
+            // scoreboard fields
             teams: {
               type: 'array',
               items: {
@@ -129,15 +155,64 @@ Call render_widget with the data you can read from the broadcast.`
               },
               minItems: 2,
               maxItems: 2,
-              description: 'Exactly two teams: [home, away].',
+              description: '[scoreboard] Exactly two teams: [home, away].',
             },
             minute: {
               type: 'integer',
               minimum: 0,
-              description: 'Current match minute (optional).',
+              description: '[scoreboard] Current match minute (optional).',
+            },
+            // timer fields
+            durationSeconds: {
+              type: 'integer',
+              minimum: 1,
+              description:
+                '[timer] Countdown duration in seconds. Required for timer type.',
+            },
+            label: {
+              type: 'string',
+              description: '[timer] Optional label shown above the countdown.',
+            },
+            // statpanel fields
+            title: {
+              type: 'string',
+              description: '[statpanel] Optional title shown above the stats list.',
+            },
+            stats: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  label: {
+                    type: 'string',
+                    description: 'Stat name (e.g. "Possession")',
+                  },
+                  value: {
+                    type: 'string',
+                    description: 'Stat value (e.g. "58%")',
+                  },
+                },
+                required: ['label', 'value'],
+              },
+              minItems: 1,
+              maxItems: 6,
+              description:
+                '[statpanel] 1–6 key/value stat rows. Required for statpanel type.',
+            },
+            // alert fields
+            message: {
+              type: 'string',
+              description:
+                '[alert] Short announcement text (e.g. "GOAL!", "Penalty!"). Required for alert type.',
+            },
+            tone: {
+              type: 'string',
+              enum: ['info', 'success', 'warning'],
+              description:
+                '[alert] Visual accent: info=blue, success=green, warning=orange. Defaults to info.',
             },
           },
-          required: ['type', 'teams'],
+          required: ['type'],
         },
       },
     ],
