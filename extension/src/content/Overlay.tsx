@@ -926,7 +926,7 @@ export function Overlay() {
           from all slot candidates during relocation. Widgets that land in the
           center zone due to the model's original assignment are relocated first.
       */}
-      {/* Proactive "✨ Auto" chip — shown when a suggestion is active */}
+      {/* Proactive "Auto" chip — shown when a suggestion is active */}
       <AnimatePresence>
         {state.status === 'layout' && state.proactive && (
           <motion.div
@@ -953,9 +953,21 @@ export function Overlay() {
               letterSpacing: '0.03em',
               pointerEvents: 'none',
               zIndex: 2147483646,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
             }}
           >
-            ✨ Auto
+            <svg
+              width="11"
+              height="11"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d="M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4L12 2z" />
+            </svg>
+            Auto
           </motion.div>
         )}
       </AnimatePresence>

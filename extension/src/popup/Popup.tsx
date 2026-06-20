@@ -132,7 +132,7 @@ export function Popup() {
       ? '... Listening'
       : status === 'sending'
         ? 'Sending...'
-        : '🎤 Speak'
+        : 'Speak'
 
   return (
     <div className="w-72 p-4 bg-gray-900 text-white font-sans">
@@ -142,10 +142,26 @@ export function Popup() {
       {/* Mic button — only shown when speech is available */}
       {speechAvailable && (
         <button
-          className="w-full py-3 rounded-xl bg-yellow-400 text-black font-bold text-sm mb-3 cursor-pointer hover:bg-yellow-300 transition-colors disabled:opacity-50"
+          className="w-full py-3 rounded-xl bg-yellow-400 text-black font-bold text-sm mb-3 cursor-pointer hover:bg-yellow-300 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
           onClick={handleMic}
           disabled={status === 'listening' || status === 'sending'}
         >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+            <line x1="12" y1="19" x2="12" y2="23" />
+            <line x1="8" y1="23" x2="16" y2="23" />
+          </svg>
           {micLabel}
         </button>
       )}
