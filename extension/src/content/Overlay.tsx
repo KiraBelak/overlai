@@ -13,6 +13,72 @@ import { getWidget } from '../lib/registry'
 // Single constant — easy to swap for production URL.
 const BACKEND_BASE_URL = 'http://localhost:3000'
 
+// ---------------------------------------------------------------------------
+// Session history — Features E + 7
+// ---------------------------------------------------------------------------
+// Maintains an in-memory log of the user's MANUAL interactions for the current
+// page session. Each entry stores the original query and a short human-readable
+// summary of what was shown, derived from the validated layout.
+//
+// The history is sent with each manual query so the backend can resolve
+// pronoun references like "and his stats?" or "what about the other team?".
+//
+// Design decisions:
+//   - Cap: last 5 entries (oldest entry evicted when limit is exceeded).
+//   - Reset: in-memory only; clears automatically on page navigation.
+//   - Proactive (watch-mode) suggestions are NOT added to history. The user did
+//     not ask for them, so they should not pollute the conversational thread.
+//   - Scope: module-level (one history per content-script lifetime == per tab).
+// ---------------------------------------------------------------------------
+
+interface HistoryEntry {
+  query: string
+  summary: string
+}
+
+const SESSION_HISTORY_MAX = 5
+
+// Module-level array — lives as long as the content script is alive (per tab).
+const sessionHistory: HistoryEntry[] = []
+
+/** Derive a compact human-readable summary from a validated Layout. */
+function deriveLayoutSummary(layout: Layout): string {
+  const parts = layout.nodes.map((n) => {
+    const w = n.widget
+    switch (w.type) {
+      case 'scoreboard': {
+        const [h, a] = w.teams
+        const min = w.minute !== undefined ? ` ${w.minute}'` : ''
+        return `scoreboard: ${h.name} ${h.score}-${a.score} ${a.name}${min}`
+      }
+      case 'statpanel': {
+        const title = w.title ? `${w.title} ` : ''
+        return `statpanel: ${title}${w.stats.map((s) => `${s.label} ${s.value}`).join(', ')}`
+      }
+      case 'timer':
+        return `timer: ${w.label ?? ''}${w.durationSeconds}s`
+      case 'alert':
+        return `alert: ${w.message}`
+      case 'momentum': {
+        const [h, a] = w.teams
+        return `momentum: ${h.name} ${h.probability}% vs ${a.name} ${a.probability}%`
+      }
+      default:
+        return (w as { type: string }).type
+    }
+  })
+  return parts.join(' | ')
+}
+
+/** Append a manual interaction to the session history, evicting the oldest if at cap. */
+function pushHistory(query: string, layout: Layout): void {
+  const entry: HistoryEntry = { query, summary: deriveLayoutSummary(layout) }
+  sessionHistory.push(entry)
+  if (sessionHistory.length > SESSION_HISTORY_MAX) {
+    sessionHistory.shift()
+  }
+}
+
 // Padding (px) between each slot container and the video edge / center.
 const SLOT_PADDING = 16
 
@@ -25,16 +91,17 @@ const REVEAL_INTERVAL_MS = 200
 
 // Reveal order: widget types listed here enter first (ascending index = earlier).
 // Types not listed fall after all listed types, then sorted by ascending zIndex.
-const REVEAL_ORDER: string[] = ['scoreboard', 'statpanel', 'timer', 'alert']
+const REVEAL_ORDER: string[] = ['scoreboard', 'momentum', 'statpanel', 'timer', 'alert']
 
 // ---------------------------------------------------------------------------
 // Widget priority: determines which widget "wins" a slot conflict and which
 // gets relocated. Higher number = higher priority = stays in its slot.
-// Priority order: alert > scoreboard > timer > statpanel
+// Priority order: alert > scoreboard > momentum > timer > statpanel
 // ---------------------------------------------------------------------------
 const WIDGET_PRIORITY: Record<string, number> = {
   alert:      40,
   scoreboard: 30,
+  momentum:   25,
   timer:      20,
   statpanel:  10,
 }
@@ -361,6 +428,7 @@ function layoutSignature(layout: Layout): string {
       if (w.type === 'alert') return `alert:${w.message}`
       if (w.type === 'timer') return `timer:${w.durationSeconds}`
       if (w.type === 'statpanel') return `statpanel:${w.title ?? ''}:${w.stats.map((s) => s.label).join(',')}`
+      if (w.type === 'momentum') return `momentum:${w.teams.map((t) => `${t.name}:${t.probability}`).join(',')}`
       return (w as { type: string }).type
     })
     .sort()
@@ -473,8 +541,11 @@ export function Overlay() {
       setState({ status: 'loading' })
 
       try {
-        const body: { text: string; image?: string } = { text }
+        // Include the current session history so the backend can resolve
+        // conversational references (e.g. "and his stats?", "the other team?").
+        const body: { text: string; image?: string; history?: HistoryEntry[] } = { text }
         if (image) body.image = image
+        if (sessionHistory.length > 0) body.history = [...sessionHistory]
 
         const response = await fetch(`${BACKEND_BASE_URL}/api/generate`, {
           method: 'POST',
@@ -502,6 +573,11 @@ export function Overlay() {
         if (!layout) {
           throw new Error('Could not normalize response to a layout')
         }
+
+        // Append this manual interaction to session history (capped at SESSION_HISTORY_MAX).
+        // Proactive suggestions are intentionally excluded — they're not part of the user's
+        // own conversational thread.
+        pushHistory(text, layout)
 
         setRevealedCount(0)
         // Manual query — not proactive.

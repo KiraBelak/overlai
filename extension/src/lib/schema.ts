@@ -46,12 +46,29 @@ export const AlertSchema = z.object({
 
 export type Alert = z.infer<typeof AlertSchema>
 
-// --- Widget node (discriminated union of the 4 widget types) ---
+// --- Momentum ---
+// Win-probability widget: two teams, each with an integer probability 0–100.
+// The two probabilities should sum to ~100; the widget normalizes them if they don't.
+export const MomentumTeamSchema = z.object({
+  name: z.string(),
+  probability: z.number().int().min(0).max(100),
+})
+
+export const MomentumSchema = z.object({
+  type: z.literal('momentum'),
+  teams: z.array(MomentumTeamSchema).length(2),
+  note: z.string().optional(),
+})
+
+export type Momentum = z.infer<typeof MomentumSchema>
+
+// --- Widget node (discriminated union of the 5 widget types) ---
 export const WidgetNodeSchema = z.discriminatedUnion('type', [
   ScoreboardSchema,
   TimerSchema,
   StatPanelSchema,
   AlertSchema,
+  MomentumSchema,
 ])
 
 export type WidgetNode = z.infer<typeof WidgetNodeSchema>

@@ -34,7 +34,12 @@ export async function OPTIONS() {
 
 export async function POST(request: Request) {
   const body = await request.json()
-  const { text, image, mode } = body as { text?: string; image?: string; mode?: string }
+  const { text, image, mode, history } = body as {
+    text?: string
+    image?: string
+    mode?: string
+    history?: Array<{ query: string; summary: string }>
+  }
 
   // Detect mode: vision-only proactive scan — no user text required.
   const isDetectMode = mode === 'detect'
@@ -73,10 +78,22 @@ export async function POST(request: Request) {
   const hasImage = typeof image === 'string' && image.startsWith('data:')
   const model = hasImage ? 'claude-sonnet-4-6' : 'claude-haiku-4-5'
 
+  // Build optional history context block to inject into the instruction text.
+  // When the client provides recent interaction history, Claude uses it to resolve
+  // pronoun references and follow-up questions (e.g. "and his stats?", "the other team?").
+  const historyBlock =
+    Array.isArray(history) && history.length > 0
+      ? `\nRecent interactions in this session (most recent last):\n${history
+          .map((h, i) => `  ${i + 1}. User asked: "${h.query}" → showed: ${h.summary}`)
+          .join('\n')}\n\nUse the above history to resolve references in the user's new request. ` +
+        `For example, if the user says "and his stats?" or "what about the other team?", ` +
+        `identify the relevant team or subject from the most recent relevant interaction and answer about that.\n`
+      : ''
+
   // Build the instruction text.
   const instructionText = hasImage
     ? `You are a sports overlay assistant. The screenshot shows the current state of a live broadcast.
-
+${historyBlock}
 STEP 1 — Identify the PRIMARY live match:
   The PRIMARY match is the one being actively played in the MAIN video frame — the large central video area.
   It is NOT a picture-in-picture feed, NOT a commentator webcam, and NOT a promo/teaser for an upcoming game.
@@ -117,6 +134,10 @@ Widget types:
 - statpanel: for match statistics (possession, shots, corners, etc.)
 - timer: when the user wants a countdown or timer
 - alert: for short announcements like "GOAL!", "Penalty!", or key events
+- momentum: when the user asks about win probability, who's going to win, momentum, or "quién va ganando".
+  Use momentum_teams (exactly 2) with integer probabilities summing to ~100. Base the estimate on
+  the visible score, match clock, and game state — NOT on prior knowledge. Always add a momentum_note
+  such as "Estimate based on score & time" to make clear it is an approximation, not official data.
 
 The user said: "${text}".
 Compose the best layout for this intent. For broad requests like "show me the match" or "full overview",
@@ -124,7 +145,7 @@ use multiple widgets — e.g. scoreboard top-left + statpanel bottom-right (non-
 For single-widget requests, one node is fine.
 Call render_layout with the data you can read from the PRIMARY live match in the broadcast.`
     : `You are a sports overlay assistant. The user said: "${text}".
-
+${historyBlock}
 You must call render_layout to compose a layout of 1–6 widgets placed in screen slots.
 Available slots: top-left, top-center, top-right, middle-left, middle-right, bottom-left, bottom-center, bottom-right.
 
@@ -133,6 +154,10 @@ Widget types:
 - timer: when the user wants a countdown or timer (e.g. "start a 5 minute timer", "30 second countdown")
 - statpanel: when the user asks for match statistics like possession, shots on target, corners, or pass accuracy
 - alert: for short dramatic announcements or events (e.g. "goal!", "show penalty alert", "red card")
+- momentum: when the user asks "who's going to win", "win probability", "momentum", or "quién va ganando".
+  Use momentum_teams (exactly 2 entries) with integer probabilities 0–100 summing to ~100.
+  Base probabilities on the visible score and time — this is an ESTIMATE, not official data.
+  Always set momentum_note to a disclaimer like "Estimate based on score & time".
 
 Slot placement rules:
 - SPREAD widgets across the screen — avoid adjacent top slots for two wide widgets (e.g. top-center + top-right collide).
@@ -230,10 +255,11 @@ Call render_layout with the best matching layout.`
                   // across widget types so they can coexist in one flat object.
                   widget_type: {
                     type: 'string',
-                    enum: ['scoreboard', 'timer', 'statpanel', 'alert'],
+                    enum: ['scoreboard', 'timer', 'statpanel', 'alert', 'momentum'],
                     description:
                       'Type of widget to render. ' +
-                      'scoreboard=live score, timer=countdown, statpanel=match stats, alert=announcement.',
+                      'scoreboard=live score, timer=countdown, statpanel=match stats, alert=announcement, ' +
+                      'momentum=win probability bar showing each team\'s estimated win chance.',
                   },
                   // scoreboard fields
                   teams: {
@@ -295,6 +321,33 @@ Call render_layout with the best matching layout.`
                     description:
                       '[alert] Visual accent: info=blue, success=green, warning=orange.',
                   },
+                  // momentum fields
+                  momentum_teams: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        name: { type: 'string', description: 'Team name' },
+                        probability: {
+                          type: 'integer',
+                          minimum: 0,
+                          maximum: 100,
+                          description: 'Estimated win probability (0–100). The two values should sum to ~100.',
+                        },
+                      },
+                      required: ['name', 'probability'],
+                    },
+                    minItems: 2,
+                    maxItems: 2,
+                    description:
+                      '[momentum] Exactly two teams with their estimated win probabilities. ' +
+                      'Values should sum to ~100. This is an ESTIMATE based on score and time — not official data.',
+                  },
+                  momentum_note: {
+                    type: 'string',
+                    description:
+                      '[momentum] Optional short note shown below the bar, e.g. "Estimate based on score & time".',
+                  },
                 },
                 required: ['slot', 'widget_type'],
               },
@@ -337,6 +390,9 @@ Call render_layout with the best matching layout.`
       // alert
       message?: string
       tone?: string
+      // momentum (prefixed to avoid collision with scoreboard's `teams`)
+      momentum_teams?: Array<{ name: string; probability: number }>
+      momentum_note?: string
     }>
   }
 
@@ -346,10 +402,15 @@ Call render_layout with the best matching layout.`
   const validNodes: Array<{ slot: string; zIndex?: number; widget: unknown }> = []
 
   for (const rawNode of rawInput.nodes ?? []) {
-    const { slot, zIndex, widget_type, ...widgetFields } = rawNode
+    const { slot, zIndex, widget_type, momentum_teams, momentum_note, ...widgetFields } = rawNode
 
     // Build the widget object from the flat fields.
-    const widgetCandidate = { type: widget_type, ...widgetFields }
+    // For momentum, remap prefixed fields to their schema names.
+    const momentumExtras =
+      widget_type === 'momentum'
+        ? { teams: momentum_teams, note: momentum_note }
+        : {}
+    const widgetCandidate = { type: widget_type, ...widgetFields, ...momentumExtras }
 
     // Validate the widget with Zod.
     const widgetParsed = WidgetNodeSchema.safeParse(widgetCandidate)
@@ -438,7 +499,7 @@ const RENDER_LAYOUT_INPUT_SCHEMA = {
           zIndex: { type: 'integer' },
           widget_type: {
             type: 'string',
-            enum: ['scoreboard', 'timer', 'statpanel', 'alert'],
+            enum: ['scoreboard', 'timer', 'statpanel', 'alert', 'momentum'],
           },
           teams: {
             type: 'array',
@@ -475,6 +536,20 @@ const RENDER_LAYOUT_INPUT_SCHEMA = {
             type: 'string',
             enum: ['info', 'success', 'warning'],
           },
+          momentum_teams: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                probability: { type: 'integer', minimum: 0, maximum: 100 },
+              },
+              required: ['name', 'probability'],
+            },
+            minItems: 2,
+            maxItems: 2,
+          },
+          momentum_note: { type: 'string' },
         },
         required: ['slot', 'widget_type'],
       },
@@ -657,14 +732,20 @@ If you DO call render_layout, use only data from the PRIMARY match's scorebug / 
       stats?: Array<{ label: string; value: string }>
       message?: string
       tone?: string
+      momentum_teams?: Array<{ name: string; probability: number }>
+      momentum_note?: string
     }>
   }
 
   const validNodes: Array<{ slot: string; zIndex?: number; widget: unknown }> = []
 
   for (const rawNode of rawInput.nodes ?? []) {
-    const { slot, zIndex, widget_type, ...widgetFields } = rawNode
-    const widgetCandidate = { type: widget_type, ...widgetFields }
+    const { slot, zIndex, widget_type, momentum_teams, momentum_note, ...widgetFields } = rawNode
+    const momentumExtras =
+      widget_type === 'momentum'
+        ? { teams: momentum_teams, note: momentum_note }
+        : {}
+    const widgetCandidate = { type: widget_type, ...widgetFields, ...momentumExtras }
     const widgetParsed = WidgetNodeSchema.safeParse(widgetCandidate)
     if (!widgetParsed.success) {
       console.warn('[overlai detect] Dropping invalid node:', widgetParsed.error.message)
