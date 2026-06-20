@@ -19,9 +19,13 @@ const SLOT_PADDING = 16
 // Gap (px) added between stacked widgets when vertical-offset fallback is used.
 const STACK_GAP = 8
 
-// Entrance stagger delay per widget (seconds). The nth widget in the sorted
-// node list gets index * STAGGER_DELAY added to its spring transition.
-const STAGGER_DELAY = 0.08
+// Interval (ms) between successive widget reveals during progressive assembly.
+// Each node appears this many milliseconds after the previous one.
+const REVEAL_INTERVAL_MS = 200
+
+// Reveal order: widget types listed here enter first (ascending index = earlier).
+// Types not listed fall after all listed types, then sorted by ascending zIndex.
+const REVEAL_ORDER: string[] = ['scoreboard', 'statpanel', 'timer', 'alert']
 
 // ---------------------------------------------------------------------------
 // Widget priority: determines which widget "wins" a slot conflict and which
@@ -348,12 +352,38 @@ type OverlayState =
   | { status: 'layout'; data: Layout }
   | { status: 'error'; message: string }
 
+// Returns the reveal-order rank for a widget type.
+// Lower rank = reveals earlier. Types absent from REVEAL_ORDER get rank = Infinity.
+function revealRank(type: string): number {
+  const idx = REVEAL_ORDER.indexOf(type)
+  return idx === -1 ? Infinity : idx
+}
+
+// Sorts layout nodes into the deliberate reveal order.
+// Primary: REVEAL_ORDER index (ascending). Secondary: zIndex (ascending).
+function sortByRevealOrder(nodes: LayoutNode[]): LayoutNode[] {
+  return [...nodes].sort((a, b) => {
+    const rankDiff = revealRank(a.widget.type) - revealRank(b.widget.type)
+    if (rankDiff !== 0) return rankDiff
+    return (a.zIndex ?? 10) - (b.zIndex ?? 10)
+  })
+}
+
 export function Overlay() {
   const [videoRect, setVideoRect] = useState<DOMRect | null>(null)
   const [state, setState] = useState<OverlayState>({ status: 'idle' })
 
   // PlacementMap computed by the measure pass.
   const [placements, setPlacements] = useState<PlacementMap>(new Map())
+
+  // Number of nodes currently revealed during progressive assembly.
+  // Starts at 0 when a new layout arrives; increments by 1 every REVEAL_INTERVAL_MS
+  // until it reaches the total node count.
+  const [revealedCount, setRevealedCount] = useState(0)
+
+  // Ref that holds the active reveal interval so we can cancel it on unmount or
+  // when a new query replaces the current layout.
+  const revealTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // Refs for measuring each widget container after render.
   // keyed by nodeKey (original slot::type).
@@ -381,7 +411,14 @@ export function Overlay() {
       const { text, image } = (event as CustomEvent<{ text: string; image?: string }>).detail
       if (!text) return
 
+      // Cancel any in-progress reveal sequence from the previous layout.
+      if (revealTimerRef.current !== null) {
+        clearInterval(revealTimerRef.current)
+        revealTimerRef.current = null
+      }
+
       setState({ status: 'loading' })
+      setRevealedCount(0)
       // Clear placements when a new query starts so old resolved positions
       // don't flash on the new layout.
       setPlacements(new Map())
@@ -419,6 +456,7 @@ export function Overlay() {
           throw new Error('Could not normalize response to a layout')
         }
 
+        setRevealedCount(0)
         setState({ status: 'layout', data: layout })
       } catch (err) {
         setState({
@@ -442,6 +480,8 @@ export function Overlay() {
   // ---------------------------------------------------------------------------
   // Runs synchronously during render, before the DOM is updated. Resolves
   // same-slot conflicts using priority and slot availability.
+  // Nodes are sorted by zIndex before deduplication so the slot-claiming order
+  // is deterministic; then re-sorted into reveal order for progressive assembly.
   const deduplicatedNodes: LayoutNode[] =
     state.status === 'layout'
       ? deduplicateSlots(
@@ -450,16 +490,81 @@ export function Overlay() {
         )
       : []
 
+  // Sorted into deliberate reveal order: scoreboard → statpanel/timer → alert.
+  // This is the order nodes are passed to AnimatePresence for progressive reveal.
+  const revealOrderedNodes: LayoutNode[] = sortByRevealOrder(deduplicatedNodes)
+
   // Build node fingerprint: sorted list of "originalSlot::type" keys.
-  // Changes when nodes are added, removed, or their types change.
+  // Based on the full node set (not just revealed nodes) so the measure pass
+  // runs against all nodes immediately when the layout arrives.
   const nodeFingerprint = deduplicatedNodes.map(nodeKey).sort().join('|')
+
+  // ---------------------------------------------------------------------------
+  // Progressive reveal: start a timer when a new layout arrives that increments
+  // revealedCount by 1 every REVEAL_INTERVAL_MS until all nodes are visible.
+  // The timer is cancelled on layout change (new query) and on unmount.
+  //
+  // Strategy for collision-resolver safety:
+  //   All nodes are rendered in a hidden measurement layer (opacity:0,
+  //   pointerEvents:none) from the moment the layout arrives. The
+  //   useLayoutEffect measure pass therefore has access to ALL widget rects
+  //   immediately — it computes final placements for the complete layout before
+  //   the reveal sequence begins. As each node enters AnimatePresence it already
+  //   knows its resolved slot and lands there directly, with no reshuffling.
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    if (state.status !== 'layout') return
+
+    const total = revealOrderedNodes.length
+
+    // Reveal the first node immediately (count goes 0 → 1).
+    setRevealedCount(1)
+
+    if (total <= 1) return
+
+    // Reveal subsequent nodes one by one.
+    let count = 1
+    const interval = setInterval(() => {
+      count += 1
+      setRevealedCount(count)
+      if (count >= total) {
+        clearInterval(interval)
+        revealTimerRef.current = null
+      }
+    }, REVEAL_INTERVAL_MS)
+
+    revealTimerRef.current = interval
+
+    return () => {
+      clearInterval(interval)
+      revealTimerRef.current = null
+    }
+  // Re-run when the layout data itself changes (new query result).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state])
+
+  // Clean up reveal timer on unmount.
+  useEffect(() => {
+    return () => {
+      if (revealTimerRef.current !== null) {
+        clearInterval(revealTimerRef.current)
+        revealTimerRef.current = null
+      }
+    }
+  }, [])
 
   // ---------------------------------------------------------------------------
   // Phase 2: Measure → resolve overlaps (post-layout)
   // ---------------------------------------------------------------------------
   // useLayoutEffect fires after DOM mutations but before paint. We measure all
-  // widget containers, detect pairwise intersections, and update the PlacementMap.
+  // widget containers from the hidden measurement layer (all nodes rendered),
+  // detect pairwise intersections, and update the PlacementMap.
   // Guard: only re-run when the node fingerprint changes (not on every render).
+  //
+  // Because ALL nodes are pre-rendered in the hidden layer regardless of
+  // revealedCount, this pass computes final placements for the COMPLETE layout
+  // on the first render after a new layout arrives. Progressive reveal then
+  // reveals each widget into its already-resolved slot — no reshuffling.
   // ---------------------------------------------------------------------------
   useLayoutEffect(() => {
     if (deduplicatedNodes.length === 0) return
@@ -543,7 +648,44 @@ export function Overlay() {
       </AnimatePresence>
 
       {/*
-        Slot-based layout renderer — single AnimatePresence wrapping ALL nodes.
+        Hidden measurement layer — ALL nodes from the current layout rendered at
+        opacity:0, pointerEvents:none, visually identical positions to their
+        final resolved slots. This ensures the useLayoutEffect measure pass
+        can collect real DOM rects for every widget immediately when the layout
+        arrives, BEFORE the progressive reveal sequence begins. The collision
+        resolver therefore computes final placements for the complete layout
+        upfront; each widget that AnimatePresence reveals subsequently lands
+        directly in its already-resolved slot without any reshuffling.
+
+        These divs are aria-hidden and never interactive.
+      */}
+      {deduplicatedNodes.map((node) => {
+        const WidgetComponent = getWidget(node.widget.type)
+        if (!WidgetComponent) return null
+
+        const key = nodeKey(node)
+        const placement = placements.get(key)
+        const resolvedSlot = (placement?.slot ?? node.slot) as Slot
+        const offsetY = placement?.offsetY ?? 0
+        const style = slotStyle(resolvedSlot, effectiveRect, offsetY)
+
+        return (
+          <div
+            key={`measure::${key}`}
+            ref={(el) => {
+              if (el) widgetRefs.current.set(key, el)
+              // Do not delete on unmount here — the visible layer's ref handles that.
+            }}
+            aria-hidden="true"
+            style={{ ...style, opacity: 0, pointerEvents: 'none', zIndex: -1 }}
+          >
+            <WidgetComponent data={node.widget} />
+          </div>
+        )
+      })}
+
+      {/*
+        Slot-based layout renderer — single AnimatePresence wrapping revealed nodes.
 
         Mode: popLayout
           When a widget exits (query replacement or dismissal), popLayout pops it
@@ -560,21 +702,20 @@ export function Overlay() {
           is a CSS-only update: the component stays mounted, position changes
           smoothly without re-mounting the Framer Motion tree.
 
-        Stagger: each widget receives an entrance delay of index * STAGGER_DELAY
-          (seconds) so the composition assembles one piece at a time instead of
-          popping all at once. Sorting by zIndex first means the bottom-layer
-          widget (background context) enters before the accent widgets layered on
-          top, which feels intentional.
+        Progressive reveal:
+          revealOrderedNodes is sorted scoreboard → statpanel/timer → alert.
+          Only the first revealedCount nodes are passed to AnimatePresence children;
+          each mounts with delay=0 since the REVEAL_INTERVAL_MS timer is the stagger.
+          No double-stagger: the timer replaces the old index*STAGGER_DELAY approach.
 
         Collision resolver:
           Phase 1 (deduplicateSlots): same-slot conflicts resolved by priority
           (alert > scoreboard > timer > statpanel). Lower-priority widget is
           relocated to the nearest free slot before first render.
 
-          Phase 2 (useLayoutEffect measure pass): after widgets paint, rects are
-          measured, pairwise intersections detected, and lower-priority widgets
-          are either relocated to a clean free slot or vertically stacked within
-          their horizontal band. The PlacementMap drives final CSS.
+          Phase 2 (useLayoutEffect measure pass): runs against the hidden
+          measurement layer (all nodes). Computes the complete PlacementMap
+          before reveal begins; revealed widgets land in their final slots directly.
 
         Center no-go zone:
           The central 40% of the video rect (both width and height) is excluded
@@ -582,7 +723,7 @@ export function Overlay() {
           center zone due to the model's original assignment are relocated first.
       */}
       <AnimatePresence mode="popLayout">
-        {deduplicatedNodes.map((node, index) => {
+        {revealOrderedNodes.slice(0, revealedCount).map((node) => {
           const WidgetComponent = getWidget(node.widget.type)
 
           // Skip nodes whose widget type is not in the registry (graceful per-node fallback).
@@ -610,7 +751,8 @@ export function Overlay() {
               }}
               style={{ ...style, zIndex: node.zIndex ?? 10 }}
             >
-              <WidgetComponent data={node.widget} delay={index * STAGGER_DELAY} />
+              {/* delay=0: the REVEAL_INTERVAL_MS timer is the stagger; no double-delay. */}
+              <WidgetComponent data={node.widget} delay={0} />
             </div>
           )
         })}
