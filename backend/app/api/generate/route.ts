@@ -77,23 +77,40 @@ export async function POST(request: Request) {
   const instructionText = hasImage
     ? `You are a sports overlay assistant. The screenshot shows the current state of a live broadcast.
 
-STEP 1 — Read the broadcast image carefully:
-  a) Identify the MAIN ACTION AREA: where is the ball / play happening? What region of the screen is the center of attention?
-  b) Identify existing ON-SCREEN broadcast graphics: score bug (bottom-left or top area), lower-thirds, team logos, sponsor banners, match clock overlays.
-  c) Identify any EMPTY regions that have no text or graphics burned in.
+STEP 1 — Identify the PRIMARY live match:
+  The PRIMARY match is the one being actively played in the MAIN video frame — the large central video area.
+  It is NOT a picture-in-picture feed, NOT a commentator webcam, and NOT a promo/teaser for an upcoming game.
 
-STEP 2 — Choose slots that:
+  a) Find the main scorebug (score bug): a dedicated broadcast graphic tied to the live action in the main frame.
+     It is usually pinned to the top-left or bottom area of the main video. This is the authoritative source for
+     team names, score, and match clock.
+  b) Identify the MAIN ACTION AREA: where is the ball / play happening? What region of the screen is the center of attention?
+  c) Identify existing ON-SCREEN broadcast graphics: score bug, lower-thirds, team logos, sponsor banners, clock overlays.
+  d) Identify any EMPTY regions that have no text or graphics burned in.
+
+STEP 2 — IGNORE these elements entirely — do NOT read or use data from them:
+  - The scrolling TICKER or results bar at the very bottom of the screen (shows OTHER match scores).
+  - Scores, team names, or results from any match OTHER than the primary live match in the main frame.
+  - "Up next", "Coming up", "Próximo partido", or any promotion for a future match.
+  - League standings tables or tournament brackets.
+  - Channel logos, sponsor banners, social media handles, watermarks.
+  - Any picture-in-picture box or commentator webcam feed.
+  If multiple scores appear, only the PRIMARY match's scorebug (attached to the live main-frame action) is valid.
+  If you cannot confidently identify which score belongs to the primary live match, omit uncertain fields or use placeholders.
+
+STEP 3 — Choose slots that:
   - AVOID the main action area (center of the screen where the play is happening).
   - AVOID covering existing broadcast graphics already burned into the feed.
   - PREFER the identified empty regions.
-  - SPREAD OUT widgets: never cluster two wide widgets in adjacent top slots (e.g. do NOT use top-center AND top-right for two wide scoreboard/alert widgets — they will collide). Instead spread across top and bottom, or left and right.
+  - SPREAD OUT widgets: never cluster two wide widgets in adjacent top slots (e.g. do NOT use top-center AND top-right
+    for two wide scoreboard/alert widgets — they will collide). Instead spread across top and bottom, or left and right.
 
 Available slots: top-left, top-center, top-right, middle-left, middle-right, bottom-left, bottom-center, bottom-right.
 - top-* = upper 25% of video; bottom-* = lower 25%; middle-* = side edges at vertical center.
 - Wide widgets (scoreboard, statpanel) need at least ~300px. top-center and top-right are adjacent — using both for wide widgets causes overlap.
 - Prefer non-adjacent slots for multi-widget layouts: e.g. top-left + bottom-right, or top-center + bottom-left.
 
-STEP 3 — Use ONLY data visible in the screenshot. Do not use prior knowledge of teams or scores.
+STEP 4 — Use ONLY data visible in the screenshot for the PRIMARY match. Do not use prior knowledge of teams or scores.
 
 Widget types:
 - scoreboard: for live match scores and team information
@@ -105,7 +122,7 @@ The user said: "${text}".
 Compose the best layout for this intent. For broad requests like "show me the match" or "full overview",
 use multiple widgets — e.g. scoreboard top-left + statpanel bottom-right (non-adjacent, non-colliding).
 For single-widget requests, one node is fine.
-Call render_layout with the data you can read from the broadcast.`
+Call render_layout with the data you can read from the PRIMARY live match in the broadcast.`
     : `You are a sports overlay assistant. The user said: "${text}".
 
 You must call render_layout to compose a layout of 1–6 widgets placed in screen slots.
@@ -374,12 +391,121 @@ Call render_layout with the best matching layout.`
 
 // ---------------------------------------------------------------------------
 // Detect mode handler — proactive event detection (no user text)
+//
+// HYBRID TWO-STAGE PIPELINE:
+//
+//   STAGE 1 — Haiku filter (cheap, fast):
+//     Model : claude-haiku-4-5
+//     Task  : Answer a structured yes/no: "is something notable happening
+//             in the PRIMARY live match right now?"
+//     Output: { notable: boolean; reason: string }
+//     Cost  : Minimal — tiny tool, small max_tokens.
+//     Gate  : If notable === false → return { suggestion: null } immediately.
+//             Do NOT call Stage 2. This keeps per-tick cost and latency low
+//             for the common case (nothing happening).
+//
+//   STAGE 2 — Sonnet confirm + render (accurate, only when needed):
+//     Model : claude-sonnet-4-6
+//     Task  : Confirm the event is genuinely notable and produce the widget
+//             layout using the full hardened grounding rules (ignore tickers,
+//             other matches, picture-in-picture, etc.).
+//     Output: optional render_layout tool call.
+//     Cost  : Paid only when Haiku said YES — typically rare during a match.
+//             Sonnet's superior OCR accuracy avoids misreading ticker scores.
+//
 // ---------------------------------------------------------------------------
-// Tool use is OPTIONAL here (no tool_choice forced). Claude may choose NOT to
-// call render_layout if nothing notable is on screen, in which case we return
-// { suggestion: null }. Only when Claude detects a notable event (goal, card,
-// penalty, big score change) will it call render_layout.
-// ---------------------------------------------------------------------------
+
+// Shared render_layout tool input schema — used by Stage 2 / generate mode.
+const RENDER_LAYOUT_INPUT_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    nodes: {
+      type: 'array',
+      description: '1–3 widget nodes for the detected event.',
+      minItems: 1,
+      maxItems: 3,
+      items: {
+        type: 'object',
+        properties: {
+          slot: {
+            type: 'string',
+            enum: [
+              'top-left', 'top-center', 'top-right',
+              'middle-left', 'middle-right',
+              'bottom-left', 'bottom-center', 'bottom-right',
+            ],
+          },
+          zIndex: { type: 'integer' },
+          widget_type: {
+            type: 'string',
+            enum: ['scoreboard', 'timer', 'statpanel', 'alert'],
+          },
+          teams: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                score: { type: 'integer', minimum: 0 },
+              },
+              required: ['name', 'score'],
+            },
+            minItems: 2,
+            maxItems: 2,
+          },
+          minute: { type: 'integer', minimum: 0 },
+          durationSeconds: { type: 'integer', minimum: 1 },
+          label: { type: 'string' },
+          title: { type: 'string' },
+          stats: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                label: { type: 'string' },
+                value: { type: 'string' },
+              },
+              required: ['label', 'value'],
+            },
+            minItems: 1,
+            maxItems: 6,
+          },
+          message: { type: 'string' },
+          tone: {
+            type: 'string',
+            enum: ['info', 'success', 'warning'],
+          },
+        },
+        required: ['slot', 'widget_type'],
+      },
+    },
+  },
+  required: ['nodes'],
+}
+
+// Hardened grounding rules shared between Stage 2 detect and generate-with-image.
+// The PRIMARY match is the one being actively played in the MAIN video frame.
+const DETECT_GROUNDING_RULES = `
+PRIMARY MATCH IDENTIFICATION:
+- The PRIMARY match is the one being actively played in the MAIN video frame (the large central video area).
+- Read ONLY the scorebug/score bug that belongs to the PRIMARY match: typically pinned top-left or bottom
+  of the main frame, tied to the live action you can see on the pitch.
+- DO NOT read scores or team names from picture-in-picture boxes, commentator webcam feeds, or any smaller inset.
+
+IGNORE these elements entirely — never use data from them:
+- The scrolling TICKER or results bar at the very bottom of the screen (shows OTHER match scores).
+- Scores, team names, or match results from any match OTHER than the primary live match.
+- "Up next", "Coming up", "Próximo partido", or any promo for a future match.
+- League standings, tournament brackets, or historical result graphics.
+- Channel logos, sponsor banners, social media handles, watermarks.
+- Picture-in-picture boxes and commentator webcam feeds.
+
+If multiple scores are visible on screen, only the PRIMARY match's scorebug is authoritative.
+If you cannot confidently identify which score belongs to the primary live match, do NOT fabricate:
+return nothing (do not call render_layout).
+
+Use ONLY data visible in the screenshot. Do not apply prior knowledge of team names or scores.`
+
 async function handleDetectMode(
   image: string | undefined,
   apiKey: string,
@@ -396,131 +522,129 @@ async function handleDetectMode(
   const commaIndex = image!.indexOf(',')
   const base64Data = commaIndex !== -1 ? image!.slice(commaIndex + 1) : image!
 
-  const detectInstruction = `You are a sports broadcast monitor. Look at this live broadcast frame carefully.
+  // Build the shared image block used by both stages.
+  const imageBlock: Anthropic.ImageBlockParam = {
+    type: 'image',
+    source: {
+      type: 'base64',
+      media_type: 'image/jpeg',
+      data: base64Data,
+    },
+  }
 
-ONLY call render_layout if there is a NOTABLE event or state worth surfacing RIGHT NOW:
+  // -------------------------------------------------------------------------
+  // STAGE 1 — Haiku filter: cheap yes/no "is something notable happening?"
+  //
+  // Model : claude-haiku-4-5 (fast, inexpensive — suited for high-frequency polling)
+  // Tool  : check_notable — structured yes/no with short reason
+  // Tokens: max_tokens 256 — we only need a tiny JSON object back
+  // -------------------------------------------------------------------------
+  const stage1Instruction = `You are a sports broadcast monitor scanning for notable live events.
+
+Look ONLY at the PRIMARY live match — the one being actively played in the MAIN video frame.
+Ignore the scrolling ticker at the bottom, any other match scores, picture-in-picture, webcams, and promos.
+
+Is a NOTABLE event happening in the PRIMARY live match RIGHT NOW?
+Notable events: goal just scored, red or yellow card shown, penalty awarded, VAR decision announced,
+significant score change, or other dramatic moment visible in the main frame.
+
+Call check_notable with your assessment. Be conservative: if you are unsure, answer notable: false.`
+
+  const stage1Response = await client.messages.create({
+    model: 'claude-haiku-4-5', // Stage 1: fast cheap filter
+    max_tokens: 256,           // Tiny — only needs { notable, reason }
+    tools: [
+      {
+        name: 'check_notable',
+        description: 'Report whether a notable live event is happening in the PRIMARY match right now.',
+        input_schema: {
+          type: 'object' as const,
+          properties: {
+            notable: {
+              type: 'boolean',
+              description: 'true if a notable event (goal, card, penalty, VAR, etc.) is happening in the primary match.',
+            },
+            reason: {
+              type: 'string',
+              description: 'One short sentence explaining why notable is true or false.',
+            },
+          },
+          required: ['notable', 'reason'],
+        },
+      },
+    ],
+    tool_choice: { type: 'tool', name: 'check_notable' }, // Force structured output
+    messages: [{ role: 'user', content: [imageBlock, { type: 'text', text: stage1Instruction }] }],
+  })
+
+  // Parse Stage 1 result.
+  const stage1Tool = stage1Response.content.find((b) => b.type === 'tool_use')
+  if (!stage1Tool || stage1Tool.type !== 'tool_use') {
+    // Unexpected — treat as non-notable to fail safe.
+    console.warn('[overlai detect] Stage 1 did not return check_notable — skipping')
+    return Response.json({ suggestion: null }, { headers: CORS_HEADERS })
+  }
+
+  const stage1Input = stage1Tool.input as { notable: boolean; reason: string }
+  console.log('[overlai detect] Stage 1 (haiku):', stage1Input.notable, '—', stage1Input.reason)
+
+  // Gate: if Haiku says nothing notable, stop here — no Sonnet call.
+  if (!stage1Input.notable) {
+    return Response.json({ suggestion: null }, { headers: CORS_HEADERS })
+  }
+
+  // -------------------------------------------------------------------------
+  // STAGE 2 — Sonnet confirm + render: accurate read, only when Haiku said YES
+  //
+  // Model : claude-sonnet-4-6 (better OCR / on-screen text accuracy)
+  // Tool  : render_layout — optional tool use (no forced choice)
+  //         Sonnet may still decide the event isn't genuinely notable or
+  //         can't be read confidently → no tool call → { suggestion: null }
+  // Tokens: max_tokens 1024 — needs to produce a full widget layout
+  // -------------------------------------------------------------------------
+  const stage2Instruction = `You are a sports broadcast monitor. Haiku flagged a potentially notable event.
+Confirm whether it is genuinely notable and — if so — compose an appropriate overlay layout.
+${DETECT_GROUNDING_RULES}
+
+ONLY call render_layout if there is a CONFIRMED NOTABLE event in the PRIMARY live match:
 - A goal just scored
 - A card shown (red or yellow)
 - A penalty awarded
 - A significant score change or milestone
 - A dramatic moment (VAR decision, injury, substitution shown on screen)
 
-If the broadcast looks routine — normal play, pre-match, half-time generic footage, or nothing remarkable — do NOT call render_layout. It is better to stay silent than to show irrelevant widgets.
+If after your own careful read you conclude there is nothing genuinely notable, or you cannot confidently
+read the primary match data, do NOT call render_layout. Return nothing.
 
-If you DO detect something notable, call render_layout with an appropriate widget or layout that highlights what is happening. Use only data visible in the screenshot.`
+If you DO call render_layout, use only data from the PRIMARY match's scorebug / main-frame graphics.`
 
-  type UserContent = Anthropic.MessageParam['content']
-  const userContent: UserContent = [
-    {
-      type: 'image',
-      source: {
-        type: 'base64',
-        media_type: 'image/jpeg',
-        data: base64Data,
-      },
-    },
-    {
-      type: 'text',
-      text: detectInstruction,
-    },
-  ]
-
-  // Same render_layout tool definition as generate mode, but tool_choice is NOT forced.
-  // Claude can choose to call it or not.
-  // Use haiku for detect mode: faster and cheaper for high-frequency polling.
-  // Sonnet is preserved for generate mode (manual queries with image) where
-  // accuracy and on-screen text reading quality matter more.
-  const response = await client.messages.create({
-    model: 'claude-haiku-4-5',
-    max_tokens: 1024,
+  const stage2Response = await client.messages.create({
+    model: 'claude-sonnet-4-6', // Stage 2: accurate — only called when Haiku said YES
+    max_tokens: 1024,           // Enough for a full render_layout payload
     tools: [
       {
         name: 'render_layout',
         description:
-          'Compose a layout of 1–3 overlay widgets for a notable live broadcast event. ' +
-          'Only call this when something genuinely notable is happening.',
-        input_schema: {
-          type: 'object' as const,
-          properties: {
-            nodes: {
-              type: 'array',
-              description: '1–3 widget nodes for the detected event.',
-              minItems: 1,
-              maxItems: 3,
-              items: {
-                type: 'object',
-                properties: {
-                  slot: {
-                    type: 'string',
-                    enum: [
-                      'top-left', 'top-center', 'top-right',
-                      'middle-left', 'middle-right',
-                      'bottom-left', 'bottom-center', 'bottom-right',
-                    ],
-                  },
-                  zIndex: { type: 'integer' },
-                  widget_type: {
-                    type: 'string',
-                    enum: ['scoreboard', 'timer', 'statpanel', 'alert'],
-                  },
-                  teams: {
-                    type: 'array',
-                    items: {
-                      type: 'object',
-                      properties: {
-                        name: { type: 'string' },
-                        score: { type: 'integer', minimum: 0 },
-                      },
-                      required: ['name', 'score'],
-                    },
-                    minItems: 2,
-                    maxItems: 2,
-                  },
-                  minute: { type: 'integer', minimum: 0 },
-                  durationSeconds: { type: 'integer', minimum: 1 },
-                  label: { type: 'string' },
-                  title: { type: 'string' },
-                  stats: {
-                    type: 'array',
-                    items: {
-                      type: 'object',
-                      properties: {
-                        label: { type: 'string' },
-                        value: { type: 'string' },
-                      },
-                      required: ['label', 'value'],
-                    },
-                    minItems: 1,
-                    maxItems: 6,
-                  },
-                  message: { type: 'string' },
-                  tone: {
-                    type: 'string',
-                    enum: ['info', 'success', 'warning'],
-                  },
-                },
-                required: ['slot', 'widget_type'],
-              },
-            },
-          },
-          required: ['nodes'],
-        },
+          'Compose a layout of 1–3 overlay widgets for a confirmed notable live broadcast event. ' +
+          'Only call this when something genuinely notable is happening in the PRIMARY match.',
+        input_schema: RENDER_LAYOUT_INPUT_SCHEMA,
       },
     ],
-    // No tool_choice here — Claude can choose to not call the tool (suggest nothing).
-    messages: [{ role: 'user', content: userContent }],
+    // No tool_choice — Sonnet may decline to call the tool if not actually notable.
+    messages: [{ role: 'user', content: [imageBlock, { type: 'text', text: stage2Instruction }] }],
   })
 
-  // Check whether Claude called the tool.
-  const toolUse = response.content.find((block) => block.type === 'tool_use')
+  // Check whether Sonnet confirmed by calling render_layout.
+  const stage2Tool = stage2Response.content.find((b) => b.type === 'tool_use')
 
-  // No tool_use block = nothing notable detected.
-  if (!toolUse || toolUse.type !== 'tool_use') {
+  // No tool call = Sonnet decided it wasn't actually notable (or couldn't read it confidently).
+  if (!stage2Tool || stage2Tool.type !== 'tool_use') {
+    console.log('[overlai detect] Stage 2 (sonnet) declined — not notable or unreadable')
     return Response.json({ suggestion: null }, { headers: CORS_HEADERS })
   }
 
-  // Reshape flat nodes → nested LayoutNodes (same as generate mode).
-  const rawInput = toolUse.input as {
+  // Reshape flat nodes → nested LayoutNodes (same pattern as generate mode).
+  const rawInput = stage2Tool.input as {
     nodes: Array<{
       slot: string
       zIndex?: number
@@ -561,5 +685,6 @@ If you DO detect something notable, call render_layout with an appropriate widge
     return Response.json({ suggestion: null }, { headers: CORS_HEADERS })
   }
 
+  console.log('[overlai detect] Stage 2 (sonnet) confirmed notable — returning suggestion')
   return Response.json({ suggestion: layoutParsed.data }, { headers: CORS_HEADERS })
 }
