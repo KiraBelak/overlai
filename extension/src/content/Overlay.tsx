@@ -1,9 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react'
 import { AnimatePresence, motion, useMotionValue } from 'framer-motion'
-import klaiIdle from '../assets/klai-idle.png'
-import klaiThinking from '../assets/klai-thinking.jpg'
-// klai-done.jpg reserved for a future 'done' voice state
-import _klaiDone from '../assets/klai-done.jpg'
+import klaiMascot from '../assets/klai-mascot.png'
 import {
   ResponseSchema,
   ControlActionSchema,
@@ -2194,9 +2191,9 @@ export function Overlay() {
           */}
           <AnimatePresence mode="sync">
             <motion.img
-              key={voiceState === 'transcribing' ? 'thinking' : 'idle'}
-              src={voiceState === 'transcribing' ? klaiThinking : klaiIdle}
-              alt={voiceState === 'transcribing' ? 'Klai thinking' : 'Klai'}
+              key="mascot"
+              src={klaiMascot}
+              alt="Klai"
               initial={{ opacity: 0, scale: 0.85 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.9, transition: { duration: 0.18 } }}
