@@ -2,6 +2,11 @@ import Anthropic from '@anthropic-ai/sdk'
 import { WidgetNodeSchema, LayoutSchema, ControlActionSchema, SlotSchema } from '@/lib/schema'
 import { GET_SPORTS_DATA_TOOL, WEB_RESEARCH_TOOL, runTool } from '@/lib/tools'
 
+// Allow the function to run long enough for web_research (Firecrawl, up to 40s)
+// to finish. Without this, Vercel kills the function at the default ~10s and the
+// Firecrawl timeout would never be reached in production.
+export const maxDuration = 60
+
 // Hardcoded fallback returned when ANTHROPIC_API_KEY is missing (dev without a key).
 // Returns a valid Layout so the no-key path exercises the new schema.
 const FALLBACK_LAYOUT = {

@@ -19,9 +19,11 @@ interface FetchOpts {
 async function postJson(
   path: string,
   body: unknown,
-  // 20s: web_research is only invoked on explicit requests (the user is waiting
-  // for research), so give Firecrawl a real chance. Normal queries never call it.
-  { timeoutMs = 20000 }: FetchOpts = {}
+  // 40s cap: web_research is only invoked on explicit requests (the user is
+  // waiting for research), so give Firecrawl plenty of room. This is a MAX — a
+  // fast result returns immediately. Normal queries never call it. Requires the
+  // route's maxDuration to be raised (see app/api/generate/route.ts).
+  { timeoutMs = 40000 }: FetchOpts = {}
 ): Promise<unknown> {
   const key = process.env.FIRECRAWL_API_KEY
   if (!key) throw new Error('FIRECRAWL_API_KEY not set')
