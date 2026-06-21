@@ -3,7 +3,7 @@
   "project-name": "Klai",
 
   // Short one-line summary of your project (in Spanish).
-  "project-oneliner-spanish": "La primera interfaz que se genera sola sobre cualquier video: le hablas y aparece, encima de lo que estás viendo, justo el widget que necesitas.",
+   "project-oneliner-spanish": "La extensión que genera una interfaz encima de cualquier video en tiempo real: le hablas y aparece justo lo que necesitas.",
 
   // Brief description of your project (in Spanish).
   "project-description-spanish": "Klai es una extensión de Chrome que convierte cualquier video en una superficie interactiva. Por voz o texto le pides algo y Klai lee el cuadro actual del video para entender el contexto y genera, animado y encima del video, el widget exacto que necesitas. Donde mejor brilla hoy es en deportes: mientras ves un partido le dices \"¿cómo va el marcador?\", \"¿quién va ganando?\", \"muéstrame las tarjetas\" o \"pon un cronómetro de 10 minutos\", y aparece al instante sobre la transmisión. Cuando la transmisión esconde el marcador (un replay, una toma abierta), Klai lo muestra con el último resultado. Puedes mover y cerrar los widgets, controlarlos por voz (\"cierra el marcador\", \"muévelo a la derecha\") y activar un modo que detecta solo los momentos importantes, como un gol o un penal. La interfaz dejó de ser botones y menús: tu intención la construye.",
