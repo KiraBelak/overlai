@@ -100,14 +100,19 @@ export default function Hero() {
 
           {/* CTAs */}
           <motion.div className={styles.ctas} variants={fv}>
-            <a href="#" className={styles.ctaPrimary}>
+            <a
+              href="https://github.com/KiraBelak/overlai/releases/latest"
+              target="_blank"
+              rel="noopener noreferrer"
+              className={styles.ctaPrimary}
+            >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M12 5v14M5 12l7 7 7-7" />
               </svg>
               Agregar a Chrome — gratis
             </a>
             <a
-              href="https://github.com"
+              href="https://github.com/KiraBelak/overlai"
               target="_blank"
               rel="noopener noreferrer"
               className={styles.ctaSecondary}

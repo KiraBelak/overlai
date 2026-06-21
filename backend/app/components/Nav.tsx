@@ -29,7 +29,7 @@ export default function Nav() {
           <a href="#casos" className={styles.link}>Casos de uso</a>
           <a href="#como-usar" className={styles.link}>Cómo funciona</a>
           <a
-            href="https://github.com"
+            href="https://github.com/KiraBelak/overlai"
             target="_blank"
             rel="noopener noreferrer"
             className={styles.link}
@@ -39,7 +39,12 @@ export default function Nav() {
         </div>
 
         <div className={styles.actions}>
-          <a href="#" className={styles.cta}>
+          <a
+            href="https://github.com/KiraBelak/overlai/releases/latest"
+            target="_blank"
+            rel="noopener noreferrer"
+            className={styles.cta}
+          >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M12 5v14M5 12l7 7 7-7" />
             </svg>
