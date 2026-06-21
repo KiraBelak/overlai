@@ -44,9 +44,23 @@ While watching a match:
 - "Put a 10 minute timer" — a countdown over the video.
 - "Give me the match summary" — several widgets at once.
 
-## Installation
+## Install (for users)
 
-Klai is open source. To run it locally:
+The fastest way to try Klai. The extension talks to our hosted backend, so you don't need to run anything else.
+
+1. Download the latest `klai-extension-v1.0.0.zip` from the [Releases page](https://github.com/KiraBelak/overlai/releases).
+2. Unzip it.
+3. Open `chrome://extensions`, enable **Developer mode** (top right).
+4. Click **Load unpacked** and select the unzipped folder.
+5. On first run, grant microphone access on the one-time page that opens (needed for voice).
+
+That's it. Open any video and start asking.
+
+> Note: Chrome does not allow one-click installs from outside the Chrome Web Store, so the load-unpacked step above is the supported way until the store listing is live.
+
+## Run from source (for developers)
+
+Klai is open source. To run the full stack locally:
 
 ### 1. Backend
 
