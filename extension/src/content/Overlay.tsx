@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react'
 import { AnimatePresence, motion, useMotionValue } from 'framer-motion'
-import { speak } from '../lib/speak'
+import { speak, unlockAudio } from '../lib/speak'
 // Mascot image lives in public/ and is loaded via chrome.runtime.getURL so it
 // resolves to a chrome-extension:// URL inside the host page (a bundled import
 // would resolve relative to the host page and 404).
@@ -1869,6 +1869,26 @@ export function Overlay() {
     return () => window.removeEventListener('klai:narration', handleNarration)
   }, [])
 
+  // Unlock the shared audio element on the user's first gesture so that
+  // subsequent proactive/watch-mode narration (which fires without a gesture)
+  // is not blocked by Chrome's autoplay policy.
+  useEffect(() => {
+    function handleFirstGesture() {
+      unlockAudio()
+      // One-time: both listeners remove themselves after the first firing.
+      document.removeEventListener('pointerdown', handleFirstGesture, { capture: true })
+      document.removeEventListener('keydown', handleFirstGesture, { capture: true })
+    }
+
+    document.addEventListener('pointerdown', handleFirstGesture, { once: true, capture: true })
+    document.addEventListener('keydown', handleFirstGesture, { once: true, capture: true })
+
+    return () => {
+      document.removeEventListener('pointerdown', handleFirstGesture, { capture: true })
+      document.removeEventListener('keydown', handleFirstGesture, { capture: true })
+    }
+  }, [])
+
   // Fallback video rect when no <video> is found: treat the full viewport as the rect.
   const effectiveRect = videoRect ?? new DOMRect(0, 0, window.innerWidth, window.innerHeight)
 
@@ -2283,6 +2303,9 @@ export function Overlay() {
           disabled={voiceState !== 'idle'}
           onClick={() => {
             if (voiceState !== 'idle') return
+            // Unlock audio on every click (idempotent after the first time) so
+            // that the mascot button is always a strong, reliable gesture source.
+            unlockAudio()
             chrome.runtime.sendMessage({ type: 'POPUP_START_RECORDING' })
           }}
           // Idle: subtle breathing float. Listening: bounce. Transcribing: wobble.
