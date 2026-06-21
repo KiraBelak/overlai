@@ -6,7 +6,7 @@ export const metadata: Metadata = {
     'Help, usage guide, and support for the Klai browser extension — the interface that generates itself over any video.',
 }
 
-const SUPPORT_EMAIL = 'support@klai.pro'
+const SUPPORT_EMAIL = 'kirabelak+helpdesk@kirabel.com'
 
 const sectionStyle: React.CSSProperties = {
   marginBottom: 40,
