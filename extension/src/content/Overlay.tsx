@@ -1437,21 +1437,10 @@ export function Overlay() {
       }
       pendingGenericTimerOpsRef.current = []
 
-      // Narrate pending widgets — combine all phrases into one utterance to avoid
-      // overlapping speech. Only one speak() call per accumulateLayout invocation.
-      if (pendingNarrationOpsRef.current.length > 0) {
-        // Update the spoken-hash tracker for each widget BEFORE speaking so that
-        // a rapid second call sees the updated hash and skips re-narration.
-        for (const op of pendingNarrationOpsRef.current) {
-          lastSpokenHashRef.current.set(op.instanceId, op.hash)
-        }
-        // Join multiple widget phrases into one utterance (~2-3 short sentences).
-        const combined = pendingNarrationOpsRef.current
-          .map((op) => op.phrase)
-          .join('. ')
-        narrate(combined)
-        pendingNarrationOpsRef.current = []
-      }
+      // Narration is handled directly in handleQuery (manual queries) — NOT here,
+      // because the setInstances updater above runs during a later render, so a ref
+      // mutated inside it is empty when read synchronously. Proactive events are
+      // intentionally silent.
     },
     [scheduleAlertTimer, scheduleGenericTimer],
   )
@@ -1682,6 +1671,17 @@ export function Overlay() {
         setStatusState({ status: 'idle' })
         // Accumulate — do NOT clear existing widgets.
         accumulateLayout(layout, false)
+
+        // Narrate the response here (manual queries always narrate). This is done
+        // directly from the layout — NOT inside accumulateLayout's setInstances
+        // updater — because React runs updaters during a later render, so a ref
+        // mutated inside the updater is still empty when read right after
+        // setInstances(). Building the phrase from layout.nodes is deterministic.
+        const spoken = layout.nodes
+          .map((n) => buildSpokenPhrase(n.widget))
+          .filter((p) => p.length > 0)
+          .join('. ')
+        if (spoken) narrate(spoken)
       } catch (err) {
         setStatusState({
           status: 'error',
